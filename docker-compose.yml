@@ -1,0 +1,87 @@
+name: payments-service
+
+x-app: &app
+  build: .
+  image: payments-service
+  restart: unless-stopped
+  environment:
+    API_KEY: ${API_KEY:-secret-key}
+    DATABASE_URL: postgresql+asyncpg://admin:admin@postgres:5432/payments
+    RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: payments
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: pg_isready -U admin -d payments
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: uvicorn src.api.app:create_app --factory --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  consumer:
+    <<: *app
+    command: python -m src.consumer
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  webhook-mock:
+    <<: *app
+    command: uvicorn tools.webhook_mock:app --host 0.0.0.0 --port 9000
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: python -c "import urllib.request; urllib.request.urlopen('http://localhost:9000/webhooks')"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  pgdata:
